@@ -1,67 +1,118 @@
 import torch
 import cv2
+import numpy as np
 from deep_sort_realtime.deepsort_tracker import DeepSort
-import torchvision.models as models
-
-
-import sys
-sys.path.append('C:/Users/kalin/코딩/kickboard2/models')
-
 import pathlib
-temp = pathlib.PosixPath
+import sys
+
+# Path 설정
 pathlib.PosixPath = pathlib.WindowsPath
 
-# 모델 경로 설정 및 모델 로드
-model_path = 'C:/Users/kalin/코딩/kickboard2/weight.pt'
-model = torch.hub.load('ultralytics/yolov5', 'custom', path ='C:/Users/kalin/코딩/kickboard2/weight.pt')
+# 모델 로드
+model_path = 'weight.pt'
+model = torch.hub.load('ultralytics/yolov5', 'custom', path=model_path)
 
-# 원래대로 PosixPath 복원
-pathlib.PosixPath = temp
+# 비디오 파일 로드
+video_path = 'kickboard2.mp4'
+cap = cv2.VideoCapture(video_path)
+if not cap.isOpened():
+    print("Error reading video file")
+    sys.exit()
 
-#from pathlib import Path
-#model_path = Path('C:/Users/kalin/코딩/kickboard/kickboard/weight.pt')
-#model = torch.load(model_path) #모델 로드
-#model.eval()
+# 비디오 속성 설정
+w, h, fps = (int(cap.get(x)) for x in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT, cv2.CAP_PROP_FPS))
 
+# 기준선 설정
+line_points = [(1080, 0), (1080, 920)]
 
-tracker = DeepSort(max_age = 30, nn_budget=70, override_track_class=None) #DeepSort 추적기 초기화
-#max_age는 추적할 객체 검출되지 않을때 추적 유지하는 시간 결정 nn_budget는 추적기의 성능과 정확도를 조절
+# 비디오 라이터 설정
+video_writer = cv2.VideoWriter("object_counting_output.avi", cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
 
+# DeepSORT 설정
+object_tracker = DeepSort(
+    max_age=5,
+    n_init=2,
+    nms_max_overlap=1.0,
+    max_cosine_distance=0.3,
+    nn_budget=None,
+    override_track_class=None,
+    embedder="mobilenet",
+    half=True,
+    bgr=True,
+    embedder_gpu=True,
+    embedder_model_name=None,
+    embedder_wts=None,
+    polygon=False,
+    today=None
+)
 
-path = 'kickboard.mp4'
+helmet_count = 0
+no_helmet_count = 0
+crossed_ids = set()
 
-cap = cv2.VideoCapture(path)
+# 기준선 교차 여부 판단 함수
+def is_crossing_line(x, prev_x, line_x):
+    return (prev_x < line_x and x >= line_x) or (prev_x > line_x and x <= line_x)
 
-while True:   #탐지 결과 순회하며 각 객체의 정보(바운딩 박스, 신뢰도, 클래스)를 리스트에 추가
-    ret, frame = cap.read()  #비디오로부터 다음 프레임 읽어오기 
-    if not ret: #프레임 읽기 성공 여부
+prev_centers = {}
+
+while cap.isOpened():
+    success, frame = cap.read()
+    if not success:
+        print("Video frame is empty or video processing has been successfully completed.")
         break
 
-    results = model(frame)  #yolov5 모델 사용 현재 프레임에서 객체 탐지
-    detections = []  #탐지된 객체 정보 저장할 리스트
+    # 객체 탐지
+    results = model(frame)
+    detections = []
 
     for *box, conf, cls in results.xyxy[0]:
         x1, y1, x2, y2 = map(int, box)
-        detections.append([[x1, y1, x2, y2],conf, cls])
+        detections.append([[x1, y1, x2 - x1, y2 - y1], conf, cls])
 
-    tracker_outputs = tracker.update_tracks(detections, frame=frame)
+    # 추적 업데이트
+    tracker_outputs = object_tracker.update_tracks(detections, frame=frame)
 
-
-    #Deep Sort 사용하여 탐지된 객체 추적
     for track in tracker_outputs:
-        bbox = track.to_tlbr()
-        id = track.track_id
-        cls = model.names[int(track.det_class)]
-        # cls = model.names[int(track.get_class())]
+        bbox = track.to_ltrb()
+        tid = track.track_id
+        cls_id = int(track.det_class)
+        cls_name = model.names[cls_id]
+        center_x = int((bbox[0] + bbox[2]) / 2)
+        center_y = int((bbox[1] + bbox[3]) / 2)
 
-        #각 객체의 바운딩 박스와 아이디, 클래스 이름 그리기
+        if tid in prev_centers:
+            prev_center_x = prev_centers[tid][0]
+            if is_crossing_line(center_x, prev_center_x, line_points[0][0]) and tid not in crossed_ids:
+                if cls_id == 0:  # Helmet
+                    helmet_count += 1
+                elif cls_id == 1:  # No Helmet
+                    no_helmet_count += 1
+                crossed_ids.add(tid)
+
+        prev_centers[tid] = (center_x, center_y)
         cv2.rectangle(frame, (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3])), (255, 0, 0), 2)
-        cv2.putText(frame, f" {cls} {id}", (int(bbox[0]), int(bbox[1]-10)), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255,0,0), 2)
+        cv2.putText(frame, f"{cls_name} {tid}", (int(bbox[0]), int(bbox[1] - 10)), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9, (255, 0, 0), 2)
 
-    cv2.imshow('YOLOv5 DeepSORT Tracking', frame) #open cv 이용 추적 결과가 포함된  프레임 디스플레이
+    # 기준선 및 카운트 표시
+    cv2.line(frame, line_points[0], line_points[1], (0, 255, 255), 2)
+    cv2.putText(frame, f"Helmet Count: {helmet_count}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.putText(frame, f"No Helmet Count: {no_helmet_count}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+    video_writer.write(frame)
+    cv2.imshow('YOLOv5 DeepSORT Object Counting', frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-cap.release() #자원 정리 
+cap.release()
+video_writer.release()
 cv2.destroyAllWindows()
+
+# 로그 파일 작성
+with open('object_count_log.txt', 'w') as log_file:
+    log_file.write(f"Helmet Count: {helmet_count}\n")
+    log_file.write(f"No Helmet Count: {no_helmet_count}\n")
+
+print("Counting completed and log file saved.")
