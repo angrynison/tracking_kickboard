@@ -5,30 +5,22 @@ from deep_sort_realtime.deepsort_tracker import DeepSort
 import pathlib
 import sys
 
-# Path 설정
 pathlib.PosixPath = pathlib.WindowsPath
 
-# 모델 로드
 model_path = 'weight.pt'
 model = torch.hub.load('ultralytics/yolov5', 'custom', path=model_path)
 
-# 비디오 파일 로드
 video_path = 'kickboard2.mp4'
 cap = cv2.VideoCapture(video_path)
 if not cap.isOpened():
     print("Error reading video file")
     sys.exit()
 
-# 비디오 속성 설정
 w, h, fps = (int(cap.get(x)) for x in (cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT, cv2.CAP_PROP_FPS))
 
-# 기준선 설정
 line_points = [(1080, 0), (1080, 920)]
-
-# 비디오 라이터 설정
 video_writer = cv2.VideoWriter("object_counting_output.avi", cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
 
-# DeepSORT 설정
 object_tracker = DeepSort(
     max_age=5,
     n_init=2,
@@ -50,7 +42,6 @@ helmet_count = 0
 no_helmet_count = 0
 crossed_ids = set()
 
-# 기준선 교차 여부 판단 함수
 def is_crossing_line(x, prev_x, line_x):
     return (prev_x < line_x and x >= line_x) or (prev_x > line_x and x <= line_x)
 
@@ -62,7 +53,6 @@ while cap.isOpened():
         print("Video frame is empty or video processing has been successfully completed.")
         break
 
-    # 객체 탐지
     results = model(frame)
     detections = []
 
@@ -70,7 +60,6 @@ while cap.isOpened():
         x1, y1, x2, y2 = map(int, box)
         detections.append([[x1, y1, x2 - x1, y2 - y1], conf, cls])
 
-    # 추적 업데이트
     tracker_outputs = object_tracker.update_tracks(detections, frame=frame)
 
     for track in tracker_outputs:
@@ -95,7 +84,6 @@ while cap.isOpened():
         cv2.putText(frame, f"{cls_name} {tid}", (int(bbox[0]), int(bbox[1] - 10)), cv2.FONT_HERSHEY_SIMPLEX,
                     0.9, (255, 0, 0), 2)
 
-    # 기준선 및 카운트 표시
     cv2.line(frame, line_points[0], line_points[1], (0, 255, 255), 2)
     cv2.putText(frame, f"Helmet Count: {helmet_count}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
     cv2.putText(frame, f"No Helmet Count: {no_helmet_count}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
@@ -110,7 +98,6 @@ cap.release()
 video_writer.release()
 cv2.destroyAllWindows()
 
-# 로그 파일 작성
 with open('object_count_log.txt', 'w') as log_file:
     log_file.write(f"Helmet Count: {helmet_count}\n")
     log_file.write(f"No Helmet Count: {no_helmet_count}\n")
